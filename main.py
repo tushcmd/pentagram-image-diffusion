@@ -33,6 +33,7 @@ app = modal.App("stable-diffusion", image=image)
 @app.cls(
     image=image,
     gpu="A10G",
+    container_idle_timeout=300,
     secrets=[modal.Secret.from_name("API_KEY")]
 )
 class Modal:
