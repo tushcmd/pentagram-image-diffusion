@@ -81,3 +81,24 @@ class Modal:
     def health(self):
         """Lightweight health check endpoint for keeping the container warm"""
         return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+# warm-keeping function that runs every 5 minutes
+@app.function(
+    schedule=modal.Cron("*/5 * * * *"),
+    secrets=[modal.Secret.from_name("API_KEY")]
+)
+
+def keep_warm():
+    # pass
+    health_url = "https://tushcmd--stable-diffusion-modal-health.modal.run"
+    generate_url = "https://tushcmd--stable-diffusion-modal-generate.modal.run"
+    
+    #First check health endpoint (no API key required)
+    health_response = requests.get(health_url)
+    print(f"Health check at: {health_response.json()['timestamp']}")
+    
+    # Then make a test request to the generate endpoint
+    headers = {"x-api-key": os.environ["API_KEY"]}
+    generate_response = requests.get(generate_url, headers=headers)
+    print(f"Generate endpoint tested successfully: {datetime.now().isoformat()}")
+   
