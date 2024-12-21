@@ -153,4 +153,285 @@ class Modal:
             )
 ```
 
-Added cron jobs to keep spp warm
+Added cron jobs to keep app warm
+Code now
+
+```py
+import modal
+import io
+from fastapi import Response, HTTPException, Query, Request
+from datetime import datetime, timezone
+import requests
+import os
+
+
+def download_model():
+    from diffusers import AutoPipelineForText2Image
+    import torch
+
+    AutoPipelineForText2Image.from_pretrained(
+        "stabilityai/sdxl-turbo",
+        torch_dtype=torch.float16,
+        variant="fp16"
+    )
+
+image = (modal.Image.debian_slim()
+    .pip_install(
+        "torch",
+        "fastapi[standard]",
+        "transformers",
+        "accelerate",  # Note: it's "accelerate" not "accelerator"
+        "diffusers",
+        "requests"
+    )
+    .run_function(download_model))
+
+app = modal.App("stable-diffusion", image=image)
+
+
+@app.cls(
+    image=image,
+    gpu="A10G",
+    container_idle_timeout=300,
+    secrets=[modal.Secret.from_name("API_KEY")]
+)
+class Modal:
+
+    @modal.build()
+    @modal.enter()
+    def load_weights(self):
+        from diffusers import AutoPipelineForText2Image
+        import torch
+
+        # self.pipe = AutoPipelineForText2Image(
+        #     "stabilityai/sdxl-turbo",
+        #     torch_dtype=torch.float16,
+        #     variant="fp16"
+        # )
+        self.pipe = AutoPipelineForText2Image.from_pretrained(
+            "stabilityai/sdxl-turbo",
+            torch_dtype=torch.float16,
+            variant="fp16"
+        )
+
+        self.pipe.to("cuda")
+        self.API_KEY = os.environ["API_KEY"]
+
+
+    @modal.web_endpoint()
+    def generate(self, request: Request, prompt: str = Query(..., description="The prompt for image generation")):
+
+
+        api_key = request.headers.get("x-api-key")
+
+        if api_key != self.API_KEY:
+            raise HTTPException(
+                status_code=401,
+                detail="Unauthorized"
+            )
+
+        image = self.pipe(prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+
+        return Response(content=buffer.getvalue(), media_type="image/jpeg")
+
+    @modal.web_endpoint()
+    def health(self):
+        """Lightweight health check endpoint for keeping the container warm"""
+        return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+# warm-keeping function that runs every 5 minutes
+@app.function(
+    schedule=modal.Cron("*/5 * * * *"),
+    secrets=[modal.Secret.from_name("API_KEY")]
+)
+
+def keep_warm():
+    # pass
+    health_url = "https://tushcmd--stable-diffusion-modal-health.modal.run"
+    generate_url = "https://tushcmd--stable-diffusion-modal-generate.modal.run"
+
+    #First check health endpoint (no API key required)
+    health_response = requests.get(health_url)
+    print(f"Health check at: {health_response.json()['timestamp']}")
+
+    # Then make a test request to the generate endpoint
+    headers = {"x-api-key": os.environ["API_KEY"]}
+    generate_response = requests.get(generate_url, headers=headers)
+    print(f"Generate endpoint tested successfully: {datetime.now().isoformat()}")
+
+```
+
+Asked claude for improvements:
+
+Let me help identify potential improvements and issues in your code. Here's what I notice:
+
+Missing error handling is the main issue. Let's add that for both endpoints.
+The generate endpoint needs to include the prompt parameter in the URL for your warm-keeping function.
+The download_model() function downloads but doesn't save or return anything, making it potentially unnecessary.
+Your keep_warm function's generate request is missing the prompt parameter.
+
+Here's the corrected version:
+
+```py
+import modal
+import io
+from fastapi import Response, HTTPException, Query, Request
+from datetime import datetime, timezone
+import requests
+import os
+
+def download_model():
+    from diffusers import AutoPipelineForText2Image
+    import torch
+
+    pipe = AutoPipelineForText2Image.from_pretrained(
+        "stabilityai/sdxl-turbo",
+        torch_dtype=torch.float16,
+        variant="fp16"
+    )
+    return pipe  # Return the pipeline to ensure it's actually downloaded
+
+image = (modal.Image.debian_slim()
+    .pip_install(
+        "torch",
+        "fastapi[standard]",
+        "transformers",
+        "accelerate",
+        "diffusers",
+        "requests"
+    )
+    .run_function(download_model))
+
+app = modal.App("stable-diffusion", image=image)
+
+@app.cls(
+    image=image,
+    gpu="A10G",
+    container_idle_timeout=300,
+    secrets=[modal.Secret.from_name("API_KEY")]
+)
+class Modal:
+
+    @modal.build()
+    @modal.enter()
+    def load_weights(self):
+        try:
+            from diffusers import AutoPipelineForText2Image
+            import torch
+
+            self.pipe = AutoPipelineForText2Image.from_pretrained(
+                "stabilityai/sdxl-turbo",
+                torch_dtype=torch.float16,
+                variant="fp16"
+            )
+
+            self.pipe.to("cuda")
+            self.API_KEY = os.environ["API_KEY"]
+        except Exception as e:
+            print(f"Error loading model: {str(e)}")
+            raise
+
+    @modal.web_endpoint()
+    def generate(self, request: Request, prompt: str = Query(..., description="The prompt for image generation")):
+        try:
+            api_key = request.headers.get("x-api-key")
+
+            if not api_key:
+                raise HTTPException(
+                    status_code=401,
+                    detail="API key missing"
+                )
+
+            if api_key != self.API_KEY:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Unauthorized"
+                )
+
+            if not prompt or len(prompt.strip()) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Prompt cannot be empty"
+                )
+
+            image = self.pipe(prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
+
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG")
+            buffer.seek(0)
+
+            return Response(content=buffer.getvalue(), media_type="image/jpeg")
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error generating image: {str(e)}"
+            )
+
+    @modal.web_endpoint()
+    def health(self):
+        """Lightweight health check endpoint for keeping the container warm"""
+        try:
+            return {
+                "status": "healthy",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Health check failed: {str(e)}"
+            )
+
+@app.function(
+    schedule=modal.Cron("*/5 * * * *"),
+    secrets=[modal.Secret.from_name("API_KEY")]
+)
+def keep_warm():
+    try:
+        health_url = "https://tushcmd--stable-diffusion-modal-health.modal.run"
+        generate_url = "https://tushcmd--stable-diffusion-modal-generate.modal.run"
+
+        # Health check
+        health_response = requests.get(health_url)
+        health_response.raise_for_status()  # Raise exception for non-200 status codes
+        print(f"Health check at: {health_response.json()['timestamp']}")
+
+        # Test generate endpoint with a simple prompt
+        headers = {"x-api-key": os.environ["API_KEY"]}
+        params = {"prompt": "test image"}  # Add prompt parameter
+        generate_response = requests.get(generate_url, headers=headers, params=params)
+        generate_response.raise_for_status()
+        print(f"Generate endpoint tested successfully: {datetime.now(timezone.utc).isoformat()}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error in keep_warm function: {str(e)}")
+        raise
+```
+
+Key improvements made:
+
+Added comprehensive error handling for all functions
+Added input validation for the prompt and API key
+Made download_model() return the pipeline
+Added proper parameters to the keep_warm function's generate request
+Used consistent timezone handling (UTC)
+Added proper response status code checking in keep_warm
+Added buffer.seek(0) before returning the image
+Added more detailed error messages
+Added proper status code handling for different types of errors
+
+Consider also adding:
+
+Rate limiting
+Maximum prompt length validation
+Logging for debugging purposes
+Metrics collection
+More detailed health checks that verify the model is loaded
+A cleanup method using @modal.exit()
+
+Would you like me to explain any of these improvements in more detail?
