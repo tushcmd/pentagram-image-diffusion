@@ -1,6 +1,6 @@
 import modal
 import io
-from fastapi import Response, HttpException, Query, Request
+from fastapi import Response, HTTPException, Query, Request
 from datetime import datetime, timezone
 import requests
 import os
@@ -16,8 +16,15 @@ def download_model():
         variant="fp16"
     )
     
-image = (modal.Image.debian_slim().
-    pip_install("fastapi[standard]", "transformers", "accelerator", "diffusers", "requests")
+image = (modal.Image.debian_slim()
+    .pip_install(
+        "torch", 
+        "fastapi[standard]", 
+        "transformers", 
+        "accelerate",  # Note: it's "accelerate" not "accelerator"
+        "diffusers", 
+        "requests"
+    )
     .run_function(download_model))
 
 app = modal.App("stable-diffusion", image=image)
@@ -36,7 +43,12 @@ class Modal:
         from diffusers import AutoPipelineForText2Image
         import torch
         
-        self.pipe = AutoPipelineForText2Image(
+        # self.pipe = AutoPipelineForText2Image(
+        #     "stabilityai/sdxl-turbo", 
+        #     torch_dtype=torch.float16,
+        #     variant="fp16"
+        # )
+        self.pipe = AutoPipelineForText2Image.from_pretrained(
             "stabilityai/sdxl-turbo", 
             torch_dtype=torch.float16,
             variant="fp16"
@@ -44,13 +56,24 @@ class Modal:
         
         self.pipe.to("cuda")
         self.API_KEY = os.environ["API_KEY"]
-        # self.pipe.enable_xformers_memory_efficient_attention()
+        
         
     @modal.web_endpoint()
     def generate(self, request: Request, prompt: str = Query(..., description="The prompt for image generation")):
+        
+        
+        api_key = request.headers.get("x-api-key")
+        
+        if api_key != self.API_KEY:
+            raise HTTPException(
+                status_code=401, 
+                detail="Unauthorized"
+            )
+        
         image = self.pipe(prompt, num_inference_steps=1, guidance_scale=0.0).images[0]
         
         buffer = io.BytesIO()
         image.save(buffer, format="JPEG")
         
         return Response(content=buffer.getvalue(), media_type="image/jpeg")
+    
