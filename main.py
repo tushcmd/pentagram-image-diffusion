@@ -77,3 +77,7 @@ class Modal:
         
         return Response(content=buffer.getvalue(), media_type="image/jpeg")
     
+    @modal.web_endpoint()
+    def health(self):
+        """Lightweight health check endpoint for keeping the container warm"""
+        return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
